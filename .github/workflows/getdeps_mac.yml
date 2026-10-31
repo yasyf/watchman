@@ -8,6 +8,7 @@
 name: mac
 
 on:
+  workflow_dispatch:
   push:
     branches:
     - host-pressure/no-periodic-clock-20261026
@@ -21,6 +22,7 @@ permissions:
 
 jobs:
   build:
+    if: github.event_name != 'workflow_dispatch'
     runs-on: macos-15
     timeout-minutes: 120
     env:
@@ -175,6 +177,20 @@ jobs:
 
     - name: Copy artifacts
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fixup-dyn-deps --src-dir=. watchman _artifacts/mac --project-install-prefix watchman:/usr/local --final-install-prefix '@loader_path/..'
+    - name: Finalize portable ad-hoc signatures
+      run: |
+        for library in _artifacts/mac/lib/libglog.2.dylib _artifacts/mac/lib/libssl.1.1.dylib; do
+          codesign -d --verbose=4 "$library" 2> "$RUNNER_TEMP/watchman-signature.txt"
+          grep -Fx 'Signature=adhoc' "$RUNNER_TEMP/watchman-signature.txt"
+          grep -Fx 'TeamIdentifier=not set' "$RUNNER_TEMP/watchman-signature.txt"
+          mode=$(stat -f %Lp "$library")
+          chmod u+w "$library"
+          codesign --force --sign - "$library"
+          chmod "$mode" "$library"
+        done
+        for image in _artifacts/mac/bin/* _artifacts/mac/lib/*; do
+          codesign --verify --strict --verbose=2 "$image"
+        done
     - uses: actions/upload-artifact@v6
       with:
         name: watchman
@@ -192,3 +208,50 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh cache list --repo ${{ github.repository }} --sort size_in_bytes --order desc --limit 30
+
+  finalize-existing-artifact:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+    - name: Download the exact graded portable artifact
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        api="https://api.github.com/repos/yasyf/watchman/actions"
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/runs/41200186976" --output source-run.json
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/artifacts/13044346511" --output source-artifact.json
+        python3 - <<'PYTHON'
+        import json
+        from pathlib import Path
+        run = json.loads(Path("source-run.json").read_text())
+        artifact = json.loads(Path("source-artifact.json").read_text())
+        assert run["id"] == 41200186976 and run["status"] == "completed" and run["conclusion"] == "success"
+        assert run["head_sha"] == "60f821ae5c3bf5578025f3699b888e76a7738fcd"
+        assert artifact["id"] == 13044346511 and artifact["name"] == "watchman" and not artifact["expired"]
+        assert artifact["workflow_run"]["id"] == run["id"] and artifact["workflow_run"]["head_sha"] == run["head_sha"]
+        assert artifact["digest"] == "sha256:35281c684082763caa5e3c2f9935f199c0347f785d5ccd4a41e3476fbdc10d5d"
+        Path("_artifacts").mkdir()
+        Path("_artifacts/packaging-source.json").write_text(json.dumps({"source_run": run["id"], "source_head": run["head_sha"], "source_full_tests": run["conclusion"], "source_artifact": artifact["id"], "source_archive_digest": artifact["digest"]}, indent=2) + "\n")
+        PYTHON
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/artifacts/13044346511/zip" --output portable.zip
+        printf '%s  portable.zip\n' '35281c684082763caa5e3c2f9935f199c0347f785d5ccd4a41e3476fbdc10d5d' | shasum -a 256 -c -
+        unzip -q portable.zip -d _artifacts
+    - name: Finalize portable ad-hoc signatures
+      run: |
+        for library in _artifacts/mac/lib/libglog.2.dylib _artifacts/mac/lib/libssl.1.1.dylib; do
+          codesign -d --verbose=4 "$library" 2> "$RUNNER_TEMP/watchman-signature.txt"
+          grep -Fx 'Signature=adhoc' "$RUNNER_TEMP/watchman-signature.txt"
+          grep -Fx 'TeamIdentifier=not set' "$RUNNER_TEMP/watchman-signature.txt"
+          mode=$(stat -f %Lp "$library")
+          chmod u+w "$library"
+          codesign --force --sign - "$library"
+          chmod "$mode" "$library"
+        done
+        for image in _artifacts/mac/bin/* _artifacts/mac/lib/*; do
+          codesign --verify --strict --verbose=2 "$image"
+        done
+    - uses: actions/upload-artifact@v6
+      with:
+        name: watchman-finalized-source-60f821ae
+        path: _artifacts
