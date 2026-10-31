@@ -11,7 +11,7 @@ include "thrift/annotation/cpp.thrift"
 include "thrift/annotation/rust.thrift"
 include "thrift/annotation/thrift.thrift"
 
-cpp_include "eden/fs/utils/GlobPath.h"
+
 
 @thrift.AllowLegacyMissingUris
 package;
@@ -107,7 +107,7 @@ typedef binary BinaryHash
  */
 typedef binary PathString
 
-@cpp.Adapter{name = "::facebook::eden::GlobPathAdapter"}
+
 typedef PathString GlobPathValue
 
 /**
