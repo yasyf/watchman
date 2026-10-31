@@ -9,6 +9,11 @@ name: mac
 
 on:
   workflow_dispatch:
+    inputs:
+      glob_cli_repro:
+        description: Run only the two source60f GlobCliJson artifact diagnostics
+        type: boolean
+        default: false
   push:
     branches:
     - host-pressure/no-periodic-clock-20261026
@@ -210,7 +215,7 @@ jobs:
       run: gh cache list --repo ${{ github.repository }} --sort size_in_bytes --order desc --limit 30
 
   finalize-existing-artifact:
-    if: github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'workflow_dispatch' && !inputs.glob_cli_repro
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -261,3 +266,61 @@ jobs:
       with:
         name: watchman-finalized-source-60f821ae
         path: _artifacts
+
+  glob-cli-artifact-repro:
+    if: github.event_name == 'workflow_dispatch' && inputs.glob_cli_repro
+    runs-on: macos-15
+    timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        path: controller
+    - uses: actions/checkout@v6
+      with:
+        ref: 60f821ae5c3bf5578025f3699b888e76a7738fcd
+        path: source
+    - name: Download and verify the exact finalized artifact
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        api="https://api.github.com/repos/yasyf/watchman/actions"
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/runs/41210323932" --output producer-run.json
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/artifacts/13045919898" --output artifact.json
+        python3 - <<'PYTHON'
+        import json
+        from pathlib import Path
+        run = json.loads(Path("producer-run.json").read_text())
+        artifact = json.loads(Path("artifact.json").read_text())
+        assert run["id"] == 41210323932 and run["head_sha"] == "fce7b2c7aeb4a080dfbd2cdca7ae0099d35c4a53" and run["conclusion"] == "success"
+        assert artifact["id"] == 13045919898 and artifact["workflow_run"]["id"] == run["id"] and artifact["workflow_run"]["head_sha"] == run["head_sha"] and not artifact["expired"]
+        assert artifact["digest"] == "sha256:ab814eecb17fa308caac6290fa27c91f6bed0eed7ea6d6eb747fbfae6183b0c1"
+        PYTHON
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/artifacts/13045919898/zip" --output payload.zip
+        printf '%s  payload.zip\n' 'ab814eecb17fa308caac6290fa27c91f6bed0eed7ea6d6eb747fbfae6183b0c1' | shasum -a 256 -c -
+        unzip -q payload.zip -d payload
+        chmod 755 payload/mac/bin/watchman payload/mac/bin/watchmanctl
+        images=(payload/mac/bin/* payload/mac/lib/*)
+        test "${#images[@]}" -eq 23
+        for image in "${images[@]}"; do
+          codesign --verify --strict --verbose=2 "$image"
+          attributes=$(xattr "$image")
+          if printf '%s\n' "$attributes" | grep -Fxq com.apple.quarantine; then exit 1; fi
+        done
+        test "$(git -C source rev-parse HEAD)" = 60f821ae5c3bf5578025f3699b888e76a7738fcd
+        uname -a
+        python3 --version
+        file payload/mac/bin/watchman
+    - name: Synthetic short JSON with a held-open CLI producer
+      run: python3 controller/.github/scripts/glob_cli_buffer_probe.py source "${{ runner.temp }}/wm-glob-synthetic"
+    - name: Reproduce only GlobCliJson246 and247 with original80s reads observed
+      run: python3 controller/.github/scripts/glob_cli_repro.py source payload/mac/bin/watchman "${{ runner.temp }}/wm-glob-repro"
+    - uses: actions/upload-artifact@v6
+      if: always()
+      with:
+        name: watchman-glob-cli-repro-source60f
+        path: |
+          ${{ runner.temp }}/wm-glob-repro
+          ${{ runner.temp }}/wm-glob-synthetic
