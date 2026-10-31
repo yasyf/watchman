@@ -348,7 +348,7 @@ jobs:
         set -e
         cat negative.log
         test "$status" -ne 0
-        grep -F 'CLI exited before the frames were decoded' negative.log
+        grep -F 'CLI hold expired before the frames were decoded' negative.log
         grep -E '^Ran 1 test in [0-9.]+s$' negative.log
         grep -Fx 'FAILED (failures=1)' negative.log
     - name: Run the held-open frame regression on the candidate transport

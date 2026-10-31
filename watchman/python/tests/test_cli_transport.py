@@ -20,14 +20,18 @@ sys.stdin.buffer.read()
 print(json.dumps({"ok": True}), flush=True)
 print(json.dumps({"second": True}), flush=True)
 release = Path(sys.argv[1])
+expired = Path(sys.argv[2])
 deadline = time.monotonic() + 5
 while not release.exists() and time.monotonic() < deadline:
     time.sleep(0.01)
+if not release.exists():
+    expired.touch()
 """
         with tempfile.TemporaryDirectory() as directory:
             release = Path(directory) / "release"
+            expired = Path(directory) / "expired"
             process = subprocess.Popen(
-                [sys.executable, "-c", producer, str(release)],
+                [sys.executable, "-c", producer, str(release), str(expired)],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
             )
@@ -44,6 +48,9 @@ while not release.exists() and time.monotonic() < deadline:
                     self.assertTrue(process.stdin.closed)
                     self.assertEqual(codec.receive(), {"ok": True})
                     self.assertEqual(codec.receive(), {"second": True})
+                    self.assertFalse(
+                        expired.exists(), "CLI hold expired before the frames were decoded"
+                    )
                     self.assertIsNone(
                         process.poll(), "CLI exited before the frames were decoded"
                     )
