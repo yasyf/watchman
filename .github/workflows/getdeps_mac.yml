@@ -214,25 +214,31 @@ jobs:
     runs-on: macos-15
     timeout-minutes: 10
     steps:
-    - name: Download the exact graded portable artifact
+    - name: Download the exact component-graded portable artifact
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
         api="https://api.github.com/repos/yasyf/watchman/actions"
         curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/runs/41200186976" --output source-run.json
         curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/artifacts/13044346511" --output source-artifact.json
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/jobs/124534292823" --output source-job.json
         python3 - <<'PYTHON'
         import json
         from pathlib import Path
         run = json.loads(Path("source-run.json").read_text())
         artifact = json.loads(Path("source-artifact.json").read_text())
-        assert run["id"] == 41200186976 and run["status"] == "completed" and run["conclusion"] == "success"
+        job = json.loads(Path("source-job.json").read_text())
+        assert run["id"] == 41200186976
+        assert job["id"] == 124534292823 and job["run_id"] == run["id"] and job["head_sha"] == run["head_sha"]
+        steps = {step["name"]: step for step in job["steps"]}
+        required = ["Build watchman", "Copy artifacts", "Run actions/upload-artifact@v6"]
+        assert all(steps[name]["status"] == "completed" and steps[name]["conclusion"] == "success" for name in required)
         assert run["head_sha"] == "60f821ae5c3bf5578025f3699b888e76a7738fcd"
         assert artifact["id"] == 13044346511 and artifact["name"] == "watchman" and not artifact["expired"]
         assert artifact["workflow_run"]["id"] == run["id"] and artifact["workflow_run"]["head_sha"] == run["head_sha"]
         assert artifact["digest"] == "sha256:35281c684082763caa5e3c2f9935f199c0347f785d5ccd4a41e3476fbdc10d5d"
         Path("_artifacts").mkdir()
-        Path("_artifacts/packaging-source.json").write_text(json.dumps({"source_run": run["id"], "source_head": run["head_sha"], "source_full_tests": run["conclusion"], "source_artifact": artifact["id"], "source_archive_digest": artifact["digest"]}, indent=2) + "\n")
+        Path("_artifacts/packaging-source.json").write_text(json.dumps({"source_run": run["id"], "source_head": run["head_sha"], "source_job": job["id"], "source_component_steps": {name: steps[name]["conclusion"] for name in required}, "source_full_run_status": run["status"], "source_full_run_conclusion": run["conclusion"], "source_full_tests": "Separate unresolved 622-test suite; no whole-pass claim", "source_artifact": artifact["id"], "source_archive_digest": artifact["digest"], "owner_verified_23_image_closure_sha256": "7eefb53682d3a15d027a3ea5b52a2665b95733386bf580cd194b59ac8788f724", "owner_actual_75s_private_case_sha256": "66f294c3f7d8abb968d1e1c5963814b60e7c49e6bb7a4dd73c82c74eedeeaf16", "owner_installed_named_handoff_sha256": "00467b9aafbcc08c92cce99f355f15d9e0106ec57ed80e696193d5295b6f4162"}, indent=2) + "\n")
         PYTHON
         curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/artifacts/13044346511/zip" --output portable.zip
         printf '%s  portable.zip\n' '35281c684082763caa5e3c2f9935f199c0347f785d5ccd4a41e3476fbdc10d5d' | shasum -a 256 -c -
