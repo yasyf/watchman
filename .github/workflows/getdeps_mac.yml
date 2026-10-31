@@ -17,6 +17,7 @@ on:
   push:
     branches:
     - host-pressure/no-periodic-clock-20261026
+    - host-pressure/cli-transport-contract-20261026
   pull_request:
     branches:
     - main
@@ -27,7 +28,7 @@ permissions:
 
 jobs:
   build:
-    if: github.event_name != 'workflow_dispatch'
+    if: github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/host-pressure/cli-transport-contract-20261026'
     runs-on: macos-15
     timeout-minutes: 120
     env:
@@ -324,3 +325,42 @@ jobs:
         path: |
           ${{ runner.temp }}/wm-glob-repro
           ${{ runner.temp }}/wm-glob-synthetic
+
+  cli-transport-contract:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/host-pressure/cli-transport-contract-20261026'
+    runs-on: macos-15
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        path: candidate
+    - uses: actions/checkout@v6
+      with:
+        ref: 60f821ae5c3bf5578025f3699b888e76a7738fcd
+        path: baseline
+    - name: Require the held-open frame regression to fail on the immutable old transport
+      run: |
+        set +e
+        PYTHONPATH=baseline/watchman/python python3 -m unittest discover -s candidate/watchman/python/tests -p test_cli_transport.py -v > negative.log 2>&1
+        status=$?
+        set -e
+        cat negative.log
+        test "$status" -ne 0
+        grep -F 'CLI exited before the frames were decoded' negative.log
+        grep -E '^Ran 1 test in [0-9.]+s$' negative.log
+        grep -Fx 'FAILED (failures=1)' negative.log
+    - name: Run the held-open frame regression on the candidate transport
+      run: |
+        PYTHONPATH=candidate/watchman/python python3 -m unittest discover -s candidate/watchman/python/tests -p test_cli_transport.py -v > candidate.log 2>&1
+        cat candidate.log
+        grep -E '^Ran 1 test in [0-9.]+s$' candidate.log
+        grep -Fx 'OK' candidate.log
+    - uses: actions/upload-artifact@v6
+      if: always()
+      with:
+        name: cli-transport-contract-macos-15
+        path: |
+          negative.log
+          candidate.log
