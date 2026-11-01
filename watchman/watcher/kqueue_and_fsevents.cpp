@@ -181,11 +181,11 @@ folly::SemiFuture<folly::Unit> KQueueAndFSEventsWatcher::flushPendingEvents() {
       !kqueueFlush.valid(),
       "This code needs to be updated to handle KQueueWatcher implementing flushPendingEvents");
 
-  auto fseventsWatchers = *fseventWatchers_.rlock();
+  auto fseventsWatchers = fseventWatchers_.rlock();
 
   std::vector<folly::SemiFuture<folly::Unit>> futures;
-  futures.reserve(fseventsWatchers.size());
-  for (auto& [name, watcher] : fseventsWatchers) {
+  futures.reserve(fseventsWatchers->size());
+  for (auto& [name, watcher] : *fseventsWatchers) {
     auto future = watcher->flushPendingEvents();
     if (future.valid()) {
       futures.push_back(std::move(future));
