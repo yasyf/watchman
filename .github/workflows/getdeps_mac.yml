@@ -8,9 +8,20 @@
 name: mac
 
 on:
+  workflow_dispatch:
+    inputs:
+      full_suite:
+        description: Run the unchanged native build and complete Mac suite
+        type: boolean
+        default: false
+      glob_cli_repro:
+        description: Run only the two source60f GlobCliJson artifact diagnostics
+        type: boolean
+        default: false
   push:
     branches:
-    - main
+    - host-pressure/no-periodic-clock-20261026
+    - host-pressure/cli-transport-contract-20261026
   pull_request:
     branches:
     - main
@@ -21,8 +32,9 @@ permissions:
 
 jobs:
   build:
-    runs-on: macOS-latest
-    timeout-minutes: 60
+    if: (github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/host-pressure/cli-transport-contract-20261026') || (github.event_name == 'workflow_dispatch' && inputs.full_suite)
+    runs-on: macos-15
+    timeout-minutes: 120
     env:
       DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
       CC: /opt/homebrew/opt/llvm/bin/clang
@@ -167,21 +179,35 @@ jobs:
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fetch --no-tests edencommon
 
     - name: Build watchman
-      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --build-type RelWithDebInfo --src-dir=. watchman --project-install-prefix watchman:/usr/local
+      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages build --num-jobs 2 --build-type RelWithDebInfo --src-dir=. watchman --project-install-prefix watchman:/usr/local
 
     - name: Show sccache stats
       if: always()
       run: sccache --show-stats
 
     - name: Copy artifacts
-      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fixup-dyn-deps --src-dir=. watchman _artifacts/mac --project-install-prefix watchman:/usr/local --final-install-prefix /usr/local
+      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fixup-dyn-deps --src-dir=. watchman _artifacts/mac --project-install-prefix watchman:/usr/local --final-install-prefix '@loader_path/..'
+    - name: Finalize portable ad-hoc signatures
+      run: |
+        for library in _artifacts/mac/lib/libglog.2.dylib _artifacts/mac/lib/libssl.1.1.dylib; do
+          codesign -d --verbose=4 "$library" 2> "$RUNNER_TEMP/watchman-signature.txt"
+          grep -Fx 'Signature=adhoc' "$RUNNER_TEMP/watchman-signature.txt"
+          grep -Fx 'TeamIdentifier=not set' "$RUNNER_TEMP/watchman-signature.txt"
+          mode=$(stat -f %Lp "$library")
+          chmod u+w "$library"
+          codesign --force --sign - "$library"
+          chmod "$mode" "$library"
+        done
+        for image in _artifacts/mac/bin/* _artifacts/mac/lib/*; do
+          codesign --verify --strict --verbose=2 "$image"
+        done
     - uses: actions/upload-artifact@v6
       with:
         name: watchman
         path: _artifacts
 
     - name: Test watchman
-      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages test --build-type RelWithDebInfo --src-dir=. watchman --project-install-prefix watchman:/usr/local
+      run: python3 build/fbcode_builder/getdeps.py --allow-system-packages test --num-jobs 2 --build-type RelWithDebInfo --src-dir=. watchman --project-install-prefix watchman:/usr/local
 
     - name: Show disk space at end
       if: always()
@@ -192,3 +218,153 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: gh cache list --repo ${{ github.repository }} --sort size_in_bytes --order desc --limit 30
+
+  finalize-existing-artifact:
+    if: github.event_name == 'workflow_dispatch' && !inputs.glob_cli_repro && !inputs.full_suite
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+    - name: Download the exact component-graded portable artifact
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        api="https://api.github.com/repos/yasyf/watchman/actions"
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/runs/41200186976" --output source-run.json
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/artifacts/13044346511" --output source-artifact.json
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/jobs/124534292823" --output source-job.json
+        python3 - <<'PYTHON'
+        import json
+        from pathlib import Path
+        run = json.loads(Path("source-run.json").read_text())
+        artifact = json.loads(Path("source-artifact.json").read_text())
+        job = json.loads(Path("source-job.json").read_text())
+        assert run["id"] == 41200186976
+        assert job["id"] == 124534292823 and job["run_id"] == run["id"] and job["head_sha"] == run["head_sha"]
+        steps = {step["name"]: step for step in job["steps"]}
+        required = ["Build watchman", "Copy artifacts", "Run actions/upload-artifact@v6"]
+        assert all(steps[name]["status"] == "completed" and steps[name]["conclusion"] == "success" for name in required)
+        assert run["head_sha"] == "60f821ae5c3bf5578025f3699b888e76a7738fcd"
+        assert artifact["id"] == 13044346511 and artifact["name"] == "watchman" and not artifact["expired"]
+        assert artifact["workflow_run"]["id"] == run["id"] and artifact["workflow_run"]["head_sha"] == run["head_sha"]
+        assert artifact["digest"] == "sha256:35281c684082763caa5e3c2f9935f199c0347f785d5ccd4a41e3476fbdc10d5d"
+        Path("_artifacts").mkdir()
+        Path("_artifacts/packaging-source.json").write_text(json.dumps({"source_run": run["id"], "source_head": run["head_sha"], "source_job": job["id"], "source_component_steps": {name: steps[name]["conclusion"] for name in required}, "source_full_run_status": run["status"], "source_full_run_conclusion": run["conclusion"], "source_full_tests": "Separate unresolved 622-test suite; no whole-pass claim", "source_artifact": artifact["id"], "source_archive_digest": artifact["digest"], "owner_verified_23_image_closure_sha256": "7eefb53682d3a15d027a3ea5b52a2665b95733386bf580cd194b59ac8788f724", "owner_actual_75s_private_case_sha256": "66f294c3f7d8abb968d1e1c5963814b60e7c49e6bb7a4dd73c82c74eedeeaf16", "owner_installed_named_handoff_sha256": "00467b9aafbcc08c92cce99f355f15d9e0106ec57ed80e696193d5295b6f4162"}, indent=2) + "\n")
+        PYTHON
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/artifacts/13044346511/zip" --output portable.zip
+        printf '%s  portable.zip\n' '35281c684082763caa5e3c2f9935f199c0347f785d5ccd4a41e3476fbdc10d5d' | shasum -a 256 -c -
+        unzip -q portable.zip -d _artifacts
+    - name: Finalize portable ad-hoc signatures
+      run: |
+        for library in _artifacts/mac/lib/libglog.2.dylib _artifacts/mac/lib/libssl.1.1.dylib; do
+          codesign -d --verbose=4 "$library" 2> "$RUNNER_TEMP/watchman-signature.txt"
+          grep -Fx 'Signature=adhoc' "$RUNNER_TEMP/watchman-signature.txt"
+          grep -Fx 'TeamIdentifier=not set' "$RUNNER_TEMP/watchman-signature.txt"
+          mode=$(stat -f %Lp "$library")
+          chmod u+w "$library"
+          codesign --force --sign - "$library"
+          chmod "$mode" "$library"
+        done
+        for image in _artifacts/mac/bin/* _artifacts/mac/lib/*; do
+          codesign --verify --strict --verbose=2 "$image"
+        done
+    - uses: actions/upload-artifact@v6
+      with:
+        name: watchman-finalized-source-60f821ae
+        path: _artifacts
+
+  glob-cli-artifact-repro:
+    if: github.event_name == 'workflow_dispatch' && inputs.glob_cli_repro && !inputs.full_suite
+    runs-on: macos-15
+    timeout-minutes: 10
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_16.2.app/Contents/Developer
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        path: controller
+    - uses: actions/checkout@v6
+      with:
+        ref: 60f821ae5c3bf5578025f3699b888e76a7738fcd
+        path: source
+    - name: Download and verify the exact finalized artifact
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        api="https://api.github.com/repos/yasyf/watchman/actions"
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/runs/41210323932" --output producer-run.json
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/artifacts/13045919898" --output artifact.json
+        python3 - <<'PYTHON'
+        import json
+        from pathlib import Path
+        run = json.loads(Path("producer-run.json").read_text())
+        artifact = json.loads(Path("artifact.json").read_text())
+        assert run["id"] == 41210323932 and run["head_sha"] == "fce7b2c7aeb4a080dfbd2cdca7ae0099d35c4a53" and run["conclusion"] == "success"
+        assert artifact["id"] == 13045919898 and artifact["workflow_run"]["id"] == run["id"] and artifact["workflow_run"]["head_sha"] == run["head_sha"] and not artifact["expired"]
+        assert artifact["digest"] == "sha256:ab814eecb17fa308caac6290fa27c91f6bed0eed7ea6d6eb747fbfae6183b0c1"
+        PYTHON
+        curl --fail --silent --show-error --location --header "Authorization: Bearer ${GH_TOKEN}" "$api/artifacts/13045919898/zip" --output payload.zip
+        printf '%s  payload.zip\n' 'ab814eecb17fa308caac6290fa27c91f6bed0eed7ea6d6eb747fbfae6183b0c1' | shasum -a 256 -c -
+        unzip -q payload.zip -d payload
+        chmod 755 payload/mac/bin/watchman payload/mac/bin/watchmanctl
+        images=(payload/mac/bin/* payload/mac/lib/*)
+        test "${#images[@]}" -eq 23
+        for image in "${images[@]}"; do
+          codesign --verify --strict --verbose=2 "$image"
+          attributes=$(xattr "$image")
+          if printf '%s\n' "$attributes" | grep -Fxq com.apple.quarantine; then exit 1; fi
+        done
+        test "$(git -C source rev-parse HEAD)" = 60f821ae5c3bf5578025f3699b888e76a7738fcd
+        uname -a
+        python3 --version
+        file payload/mac/bin/watchman
+    - name: Synthetic short JSON with a held-open CLI producer
+      run: python3 controller/.github/scripts/glob_cli_buffer_probe.py source "${{ runner.temp }}/wm-glob-synthetic"
+    - name: Reproduce only GlobCliJson246 and247 with original80s reads observed
+      run: python3 controller/.github/scripts/glob_cli_repro.py source payload/mac/bin/watchman "${{ runner.temp }}/wm-glob-repro"
+    - uses: actions/upload-artifact@v6
+      if: always()
+      with:
+        name: watchman-glob-cli-repro-source60f
+        path: |
+          ${{ runner.temp }}/wm-glob-repro
+          ${{ runner.temp }}/wm-glob-synthetic
+
+  cli-transport-contract:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/host-pressure/cli-transport-contract-20261026'
+    runs-on: macos-15
+    timeout-minutes: 5
+    env:
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+    - uses: actions/checkout@v6
+      with:
+        path: candidate
+    - uses: actions/checkout@v6
+      with:
+        ref: 60f821ae5c3bf5578025f3699b888e76a7738fcd
+        path: baseline
+    - name: Require the held-open frame regression to fail on the immutable old transport
+      run: |
+        set +e
+        PYTHONPATH=baseline/watchman/python python3 -m unittest discover -s candidate/watchman/python/tests -p test_cli_transport.py -v > negative.log 2>&1
+        status=$?
+        set -e
+        cat negative.log
+        test "$status" -ne 0
+        grep -F 'CLI hold expired before the frames were decoded' negative.log
+        grep -E '^Ran 1 test in [0-9.]+s$' negative.log
+        grep -Fx 'FAILED (failures=1)' negative.log
+    - name: Run the held-open frame regression on the candidate transport
+      run: |
+        PYTHONPATH=candidate/watchman/python python3 -m unittest discover -s candidate/watchman/python/tests -p test_cli_transport.py -v > candidate.log 2>&1
+        cat candidate.log
+        grep -E '^Ran 1 test in [0-9.]+s$' candidate.log
+        grep -Fx 'OK' candidate.log
+    - uses: actions/upload-artifact@v6
+      if: always()
+      with:
+        name: cli-transport-contract-macos-15
+        path: |
+          negative.log
+          candidate.log

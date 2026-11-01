@@ -649,7 +649,7 @@ void appendGlobResultToNameAndDTypeVec(
     // our DType enum is declared in terms of those bits
     auto dtype = i < numDTypes ? static_cast<DType>(glob.dtypes().value()[i])
                                : DType::Unknown;
-    results.emplace_back(std::move(name).intoFbString(), dtype);
+    results.emplace_back(std::move(name), dtype);
     ++i;
   }
 }

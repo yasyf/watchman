@@ -32,6 +32,9 @@ fbcode/eden/fs = eden/fs
 [shipit.strip]
 ^fbcode/eden/fs/(?!.*\.thrift|service/shipit_test_file\.txt|utils/GlobPath\.h$)
 
+[cmake.defines.os=darwin]
+WATCHMAN_USE_XDG_STATE_HOME=ON
+
 [cmake.defines.fb=on]
 ENABLE_EDEN_SUPPORT=ON
 IS_FB_BUILD=ON

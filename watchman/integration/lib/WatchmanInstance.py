@@ -204,7 +204,7 @@ class _Instance:
 
     def commandViaCLI(self, cmd, prefix=None):
         """a very bare bones helper to test the site spawner functionality"""
-        args = prefix or []
+        args = list(prefix or [])
         args.extend([self.watchmanBinary(), "--log-level=2"])
         args.extend(self.get_state_args())
         args.extend(cmd)
@@ -215,7 +215,12 @@ class _Instance:
         proc = subprocess.Popen(
             args, env=env, stdin=None, stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
-        return proc.communicate()
+        try:
+            return proc.communicate(timeout=self.start_timeout)
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+            proc.wait()
 
     def start(self, extra_env=None) -> None:
         startFseventsd()
