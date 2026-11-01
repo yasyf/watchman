@@ -10,6 +10,10 @@ name: mac
 on:
   workflow_dispatch:
     inputs:
+      full_suite:
+        description: Run the unchanged native build and complete Mac suite
+        type: boolean
+        default: false
       glob_cli_repro:
         description: Run only the two source60f GlobCliJson artifact diagnostics
         type: boolean
@@ -28,7 +32,7 @@ permissions:
 
 jobs:
   build:
-    if: github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/host-pressure/cli-transport-contract-20261026'
+    if: (github.event_name != 'workflow_dispatch' && github.ref != 'refs/heads/host-pressure/cli-transport-contract-20261026') || (github.event_name == 'workflow_dispatch' && inputs.full_suite)
     runs-on: macos-15
     timeout-minutes: 120
     env:
@@ -216,7 +220,7 @@ jobs:
       run: gh cache list --repo ${{ github.repository }} --sort size_in_bytes --order desc --limit 30
 
   finalize-existing-artifact:
-    if: github.event_name == 'workflow_dispatch' && !inputs.glob_cli_repro
+    if: github.event_name == 'workflow_dispatch' && !inputs.glob_cli_repro && !inputs.full_suite
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -269,7 +273,7 @@ jobs:
         path: _artifacts
 
   glob-cli-artifact-repro:
-    if: github.event_name == 'workflow_dispatch' && inputs.glob_cli_repro
+    if: github.event_name == 'workflow_dispatch' && inputs.glob_cli_repro && !inputs.full_suite
     runs-on: macos-15
     timeout-minutes: 10
     env:

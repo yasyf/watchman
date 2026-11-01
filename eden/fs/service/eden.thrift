@@ -1099,6 +1099,8 @@ enum DataFetchOrigin {
   NOWHERE = 0,
   ANYWHERE = 1,
   MEMORY_CACHE = 2,
+  // EdenFS has no on-disk object store of its own; nothing is served from
+  // this origin. The value is reserved so the later ones stay stable.
   DISK_CACHE = 4,
   LOCAL_BACKING_STORE = 8,
   REMOTE_BACKING_STORE = 16,
@@ -1627,7 +1629,7 @@ struct PredictiveFetch {
   6: optional unsigned64 endTime;
 }
 
-/** Params for prefetchFiles(). */
+/** Params for prefetchFilesV2(). */
 struct PrefetchParams {
   1: PathString mountPoint;
   2: list<string> globs;
@@ -1730,7 +1732,7 @@ struct HgCacheStats {
   11: i64 lfsBytesLimit;
 }
 
-/** Result for prefetchFiles(). */
+/** Result for prefetchFilesV2(). */
 struct PrefetchResult {
   1: optional Glob prefetchedFiles;
   2: optional PrefetchStats stats;
@@ -1894,17 +1896,24 @@ struct FaultDefinition {
   // If count is non-zero this fault will automatically expire after it has
   // been hit count times.
   3: i64 count;
+  // injectFault applies the first behavior that is set, in this order:
+  // block, blockWithCancel, kill, unblock, then the delay and error fields.
+  // Fields for later behaviors are ignored.
+  //
   // If block is true the fault will block until explicitly unblocked later.
-  // delayMilliseconds and errorMessage will be ignored if block is true
   4: bool block;
   5: i64 delayMilliseconds;
   6: optional string errorType;
   7: optional string errorMessage;
   // If kill is true the fault will exit the process ungracefully.
-  // block, delay, and errorMessage will be ignored if kill is true.
   8: bool kill;
   // If blockWithCancel is true the fault will block until the request is cancelled or times out.
   9: bool blockWithCancel;
+  // If both unblock fields are set, hitting this fault releases matching
+  // blocked checks instead of applying the delay and error fields. Setting
+  // only one of them is rejected with EINVAL.
+  10: optional string unblockKeyClass;
+  11: optional string unblockKeyValueRegex;
 }
 
 struct RemoveFaultArg {
@@ -2831,17 +2840,6 @@ service EdenService extends fb303_core.BaseService {
   ReaddirResult readdir(1: ReaddirParams params) throws (1: EdenError ex);
 
   /**
-   * DEPRECATED: Use globFiles().
-   *
-   * Note: may return stale data if synchronizeWorkingCopy isn't called, see the
-   * documentation for that method.
-   */
-  list<PathString> glob(
-    1: PathString mountPoint,
-    2: list<string> globs,
-  ) throws (1: EdenError ex);
-
-  /**
    * Returns a list of files that match the GlobParams, notably,
    * the list of glob patterns.
    * There are no duplicate values in the result.
@@ -2851,17 +2849,6 @@ service EdenService extends fb303_core.BaseService {
    * these for more details.
    */
   Glob globFiles(1: GlobParams params) throws (1: EdenError ex);
-
-  /**
-   * DEPRECATED: use prefetchFilesV2
-   *
-   * Has the same behavior as globFiles, but should be called in the case of a prefetch.
-   * This request could be deprioritized since it will be assumed that this call is used
-   * for optimization and the result not relied on for operations. This command does not
-   * return the list of prefetched files.
-   */
-  @thrift.Priority{level = thrift.RpcPriority.BEST_EFFORT}
-  void prefetchFiles(1: PrefetchParams params) throws (1: EdenError ex);
 
   /**
    * Has the same behavior as globFiles, but should be called in the case of a prefetch.
@@ -2883,21 +2870,6 @@ service EdenService extends fb303_core.BaseService {
   PreloadProgressResponse queryPreloadProgress(
     1: PreloadProgressRequest request,
   ) throws (1: EdenError ex);
-
-  /**
-   * DEPRECATED: predictive prefetching has been removed. This method is a
-   * no-op that always returns an empty Glob.
-   */
-  Glob predictiveGlobFiles(1: GlobParams params) throws (1: EdenError ex);
-
-  /**
-   * Chowns all files in the requested mount to the requested uid and gid
-   *
-   * DEPRECATED: Prefer using ChangeOwnership in new code.  Callers may still
-   * need to fall back to chown() if talking to an older edenfs daemon
-   * that does not support ChangeOwnership() yet.
-   */
-  void chown(1: PathString mountPoint, 2: i32 uid, 3: i32 gid);
 
   /**
    * Changes ownership all files in the requested mount to the requested uid and gid
@@ -2981,26 +2953,6 @@ service EdenService extends fb303_core.BaseService {
   void reloadConfig() throws (1: EdenError ex);
 
   //////// Debugging APIs ////////
-
-  /**
-   * DEPRECATED: Use debugGetTree().
-   * TODO: remove this API after 07/01/2024
-   *
-   * Get the contents of a source control Tree.
-   *
-   * This can be used to confirm if eden's LocalStore contains information
-   * for the tree, and that the information is correct.
-   *
-   * If localStoreOnly is true, the data is loaded directly from the
-   * LocalStore, and an error will be raised if it is not already present in
-   * the LocalStore.  If localStoreOnly is false, the data may be retrieved
-   * from the BackingStore if it is not already present in the LocalStore.
-   */
-  list<ScmTreeEntry> debugGetScmTree(
-    1: PathString mountPoint,
-    2: ThriftObjectId id,
-    3: bool localStoreOnly,
-  ) throws (1: EdenError ex);
 
   DebugGetScmTreeResponse debugGetTree(
     1: DebugGetScmTreeRequest request,
@@ -3176,29 +3128,6 @@ service EdenService extends fb303_core.BaseService {
   GetFetchedFilesResult stopRecordingBackingStoreFetch() throws (
     1: EdenError ex,
   );
-
-  /**
-   * Column by column, clears and compacts the LocalStore. All columns are
-   * compacted, but only columns that contain ephemeral data are cleared.
-   *
-   * Even though the behavior of this method is identical to
-   * debugClearLocalStoreCaches followed by debugCompactLocalStorage(), it is
-   * separate so it can clear and compact each column in order to minimize the
-   * risk of running out of disk space. Since RocksDB is a write-ahead logging
-   * database, clearing a column increases its disk usage until it's compacted.
-   */
-  void clearAndCompactLocalStore() throws (1: EdenError ex);
-
-  /**
-   * Clears all data from the LocalStore that can be populated from the upstream
-   * backing store.
-   */
-  void debugClearLocalStoreCaches() throws (1: EdenError ex);
-
-  /**
-   * Asks RocksDB to perform a compaction.
-   */
-  void debugCompactLocalStorage() throws (1: EdenError ex);
 
   /**
    * Requests EdenFS to drop all pending backing store fetches.

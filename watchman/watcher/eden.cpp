@@ -28,7 +28,6 @@
 #include "eden/fs/service/gen-cpp2/StreamingEdenService.h"
 #include "watchman/ChildProcess.h"
 #include "watchman/Errors.h"
-#include "watchman/LRUCache.h"
 #include "watchman/QueryableView.h"
 #include "watchman/ThreadPool.h"
 #include "watchman/fs/FSDetect.h"
@@ -43,7 +42,6 @@
 #include "watchman/watcher/Watcher.h"
 #include "watchman/watcher/WatcherRegistry.h"
 
-using apache::thrift::TApplicationException;
 using namespace facebook::eden;
 using folly::AsyncSocket;
 using std::make_unique;
@@ -356,7 +354,7 @@ class EdenFileResult : public FileResult {
       // Copy thrift SHA1Result aka (std::string) into
       // watchman FileResult::ContentHash aka (std::array<uint8_t, 20>)
       case SHA1Result::Type::sha1: {
-        auto& hash = sha1_->get_sha1();
+        auto& hash = sha1_->sha1().as_const().value();
         FileResult::ContentHash result;
         std::copy(hash.begin(), hash.end(), result.begin());
 
@@ -365,7 +363,7 @@ class EdenFileResult : public FileResult {
 
       // Thrift error occured
       case SHA1Result::Type::error: {
-        auto& err = sha1_->get_error();
+        auto& err = sha1_->error().as_const().value();
         XCHECK(err.errorCode());
         throw std::system_error(
             *err.errorCode(), std::generic_category(), *err.message());
@@ -479,8 +477,8 @@ class EdenFileResult : public FileResult {
   w_string fullName_;
   std::optional<FileInformation> stat_;
   std::optional<bool> exists_;
-  ClockStamp ctime_;
-  ClockStamp otime_;
+  ClockStamp ctime_{};
+  ClockStamp otime_{};
   std::optional<SHA1Result> sha1_;
   std::optional<ResolvedSymlink> symlinkTarget_;
   DType dtype_{DType::Unknown};
@@ -539,19 +537,10 @@ class EdenFileResult : public FileResult {
 
     if (onlyEntryInfoNeeded) {
       std::vector<EntryInformationOrError> info;
-      try {
-        client->sync_getEntryInformation(
-            info, std::string{rootPath.view()}, names, getSyncBehavior());
-        applyResults(info);
-        return;
-      } catch (const TApplicationException& ex) {
-        if (TApplicationException::UNKNOWN_METHOD != ex.getType()) {
-          throw;
-        }
-        // getEntryInformation is not available in this version of
-        // Eden. Fall back to the older, more expensive
-        // getFileInformation below.
-      }
+      client->sync_getEntryInformation(
+          info, std::string{rootPath.view()}, names, getSyncBehavior());
+      applyResults(info);
+      return;
     }
 
     std::vector<FileInformationOrError> info;
@@ -562,7 +551,7 @@ class EdenFileResult : public FileResult {
 
   void applyInformationOrError(const EntryInformationOrError& infoOrErr) {
     if (infoOrErr.getType() == EntryInformationOrError::Type::info) {
-      dtype_ = getDTypeFromEden(*infoOrErr.get_info().dtype());
+      dtype_ = getDTypeFromEden(*infoOrErr.info()->dtype());
       setExists(true);
     } else {
       setExists(false);
@@ -573,10 +562,10 @@ class EdenFileResult : public FileResult {
     if (infoOrErr.getType() == FileInformationOrError::Type::info) {
       FileInformation stat;
 
-      stat.size = *infoOrErr.get_info().size();
-      stat.mode = *infoOrErr.get_info().mode();
-      stat.mtime.tv_sec = *infoOrErr.get_info().mtime()->seconds();
-      stat.mtime.tv_nsec = *infoOrErr.get_info().mtime()->nanoSeconds();
+      stat.size = *infoOrErr.info()->size();
+      stat.mode = *infoOrErr.info()->mode();
+      stat.mtime.tv_sec = *infoOrErr.info()->mtime()->seconds();
+      stat.mtime.tv_nsec = *infoOrErr.info()->mtime()->nanoSeconds();
 
       stat_ = std::move(stat);
       setExists(true);
@@ -606,6 +595,25 @@ static std::string escapeGlobSpecialChars(w_string_piece str) {
   return result;
 }
 
+/** Returns true if `name` (relative to `relative_root` under the watched root)
+ * is ignored or outside the query's relative_root, i.e. the query can never
+ * return it. */
+bool isOutsideQueryScope(
+    QueryContext* ctx,
+    w_string_piece relative_root,
+    w_string_piece name) {
+  w_string full =
+      w_string::pathCat({ctx->root->root_path, relative_root, name});
+
+  if (!ctx->fileMatchesRelativeRoot(full)) {
+    // Not in the desired area, so filter it out
+    return true;
+  }
+
+  return ctx->root->ignore.isIgnored(
+      full.data(), static_cast<uint32_t>(full.size()));
+}
+
 /** filter out paths that are ignored or that are not part of the
  * relative_root restriction in a query.
  * Ideally we'd pass this information into eden so that it doesn't
@@ -622,17 +630,8 @@ void filterOutPaths(
       std::remove_if(
           files.begin(),
           files.end(),
-          [ctx, relative_root](const NameAndDType& item) {
-            w_string full;
-            full = w_string::pathCat(
-                {ctx->root->root_path, relative_root, item.name});
-
-            if (!ctx->fileMatchesRelativeRoot(full)) {
-              // Not in the desired area, so filter it out
-              return true;
-            }
-
-            return ctx->root->ignore.isIgnored(full.data(), full.size());
+          [ctx, &relative_root](const NameAndDType& item) {
+            return isOutsideQueryScope(ctx, relative_root, item.name);
           }),
       files.end());
 }
@@ -775,6 +774,9 @@ class EdenView final : public QueryableView {
         thresholdForFreshInstance_(config.getInt(
             "eden_file_count_threshold_for_fresh_instance",
             10000)),
+        scopedFreshInstanceScanLimit_(config.getInt(
+            "eden_scoped_fresh_instance_scan_limit",
+            10 * static_cast<int64_t>(thresholdForFreshInstance_))),
         enableGlobUpperBounds_(
             config.getBool("eden_enable_glob_upper_bounds", true)) {}
 
@@ -860,12 +862,6 @@ class EdenView final : public QueryableView {
            })
         .defer([](folly::Try<folly::Unit> try_) {
           if (try_.hasException()) {
-            if (auto* exc =
-                    try_.tryGetExceptionObject<TApplicationException>()) {
-              if (exc->getType() == TApplicationException::UNKNOWN_METHOD) {
-                return folly::Try{CookieSync::SyncResult{}};
-              }
-            }
             return folly::Try<CookieSync::SyncResult>{
                 std::move(try_.exception())};
           }
@@ -1072,19 +1068,8 @@ class EdenView final : public QueryableView {
       GetJournalPositionCallback& getJournalPositionCallback,
       std::chrono::milliseconds settleTimeout) {
     auto client = getEdenClient(thriftChannel_);
-    apache::thrift::ClientBufferedStream<::facebook::eden::JournalPosition>
-        stream;
-    try {
-      stream = client->sync_streamJournalChanged(
-          std::string(root->root_path.data(), root->root_path.size()));
-    } catch (const apache::thrift::TApplicationException& exc) {
-      log(DBG,
-          "running eden version does not have streamJournalChanged, falling back to subscribeStreamTemporary: ",
-          exc.what(),
-          "\n");
-      stream = client->sync_subscribeStreamTemporary(
-          std::string(root->root_path.data(), root->root_path.size()));
-    }
+    auto stream = client->sync_streamJournalChanged(
+        std::string(root->root_path.data(), root->root_path.size()));
     return std::move(stream).subscribeExTry(
         &subscriberEventBase_,
         [&settleCallback,
@@ -1275,7 +1260,7 @@ class EdenView final : public QueryableView {
     return globNameAndDType(
         client.get(),
         mountPoint_,
-        std::move(globPatterns),
+        globPatterns,
         /*includeDotfiles=*/true,
         splitGlobPattern_,
         /*listOnlyFiles=*/false,
@@ -1283,7 +1268,7 @@ class EdenView final : public QueryableView {
   }
 
   struct GetAllChangesSinceResult {
-    ClockTicks ticks;
+    ClockTicks ticks{};
     std::vector<NameAndDType> fileInfo;
     std::unordered_set<folly::fbstring> createdFileNames;
   };
@@ -1325,6 +1310,10 @@ class EdenView final : public QueryableView {
     std::unordered_map<std::string, int> byFile;
     std::unordered_map<std::string, EdenDtype> dtypes;
     bool freshInstance = false;
+    const bool countOnlyQueryScope = ctx->query->scope_fresh_instance_threshold;
+    const bool enforceThreshold =
+        thresholdForFreshInstance_ != 0 && ctx->query->empty_on_fresh_instance;
+    size_t streamedCount = 0;
 
     std::move(stream).subscribeInline(
         [&](folly::Try<ChangedFileResult>&& changeTry) mutable {
@@ -1345,6 +1334,27 @@ class EdenView final : public QueryableView {
 
           const auto& change = changeTry.value();
           auto& name = *change.name();
+
+          if (countOnlyQueryScope) {
+            // Out-of-scope changes no longer count toward the threshold, so
+            // bound the total scan separately.
+            if (enforceThreshold &&
+                ++streamedCount > scopedFreshInstanceScanLimit_) {
+              freshInstance = true;
+              std::string logMessage = fmt::format(
+                  "Scanned change amount {} exceeded scan limit {}",
+                  streamedCount,
+                  scopedFreshInstanceScanLimit_);
+              log(ERR, logMessage, "\n");
+              ctx->freshInstanceCause = std::move(logMessage);
+              return false;
+            }
+            // filterOutPaths() drops these later anyway; dropping them here
+            // keeps them out of the thresholdForFreshInstance_ count.
+            if (isOutsideQueryScope(ctx, "", name)) {
+              return true;
+            }
+          }
 
           // Changes needs to be deduplicated so a file that was added and then
           // removed is reported as MODIFIED.
@@ -1476,6 +1486,7 @@ class EdenView final : public QueryableView {
   folly::SharedPromise<folly::Unit> subscribeReadyPromise_;
   bool splitGlobPattern_;
   unsigned int thresholdForFreshInstance_;
+  size_t scopedFreshInstanceScanLimit_;
   bool enableGlobUpperBounds_;
 };
 
