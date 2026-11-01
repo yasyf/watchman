@@ -126,12 +126,10 @@ class TestSubscribe(WatchmanTestCase.WatchmanTestCase):
             self.waitForSub(
                 "defer",
                 root,
-                accept=lambda x: self.matchStateSubscription(x, "state-leave"),
+                accept=lambda x: self.matchStateSubscription(x, "state-leave")
+                and any("in-foo" in item.get("files", []) for item in x),
             ),
         )
-
-        # and now we should observe the file change
-        self.assertNotEqual(None, self.waitForSub("defer", root))
 
         # and again, but this time passing metadata
         self.watchmanCommand("state-enter", root, {"name": "foo", "metadata": "meta!"})
@@ -164,16 +162,15 @@ class TestSubscribe(WatchmanTestCase.WatchmanTestCase):
             "state-leave", root, {"name": "foo", "metadata": "leavemeta"}
         )
 
-        # pyrefly: ignore [unsupported-operation]
-        end = self.waitForSub(
+        sub = self.waitForSub(
             "defer",
             root,
-            accept=lambda x: self.matchStateSubscription(x, "state-leave"),
-        )[0]
+            accept=lambda x: self.matchStateSubscription(x, "state-leave")
+            and any("in-foo-3" in item.get("files", []) for item in x),
+        )
+        self.assertIsNotNone(sub)
+        end = self.matchStateSubscription(sub, "state-leave")
         self.assertEqual("leavemeta", end["metadata"])
-
-        # and now we should observe the file change
-        self.assertNotEqual(None, self.waitForSubFileList("defer", root, ["in-foo-3"]))
 
     def test_drop_state(self) -> None:
         root = self.mkdtemp()

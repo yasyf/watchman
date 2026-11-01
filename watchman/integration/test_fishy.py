@@ -91,11 +91,11 @@ class TestFishy(WatchmanTestCase.WatchmanTestCase):
 
     def test_notify_dir(self) -> None:
         root = self.mkdtemp()
-        self.watchmanCommand("watch", root)
         os.mkdir(os.path.join(root, "wtest"))
         os.mkdir(os.path.join(root, "wtest", "dir"))
         self.touchRelative(root, "wtest", "1")
         self.touchRelative(root, "wtest", "2")
+        self.watchmanCommand("watch", root)
         self.assertFileList(
             root, ["wtest", "wtest/1", "wtest/2", "wtest/dir"], cursor="n:foo"
         )
