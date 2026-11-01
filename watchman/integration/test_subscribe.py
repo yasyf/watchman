@@ -496,8 +496,8 @@ class TestSubscribe(WatchmanTestCase.WatchmanTestCase):
         )
 
         self.touchRelative(root, "c")
-        self.touchRelative(a_dir, "d.txt")
-        self.touchRelative(a_dir, "e.dat")
+        self.touchRelative(root, "d.txt")
+        self.touchRelative(root, "e.dat")
 
         # test out a few broken flush-subscriptions
         broken_args = [
@@ -567,12 +567,12 @@ class TestSubscribe(WatchmanTestCase.WatchmanTestCase):
             )
 
         # pyrefly: ignore [unsupported-operation]
-        self.assertFileListsEqual(["a/d.txt", "a/e.dat", "c"], sub1_data[0]["files"])
+        self.assertFileListsEqual(["c", "d.txt", "e.dat"], sub1_data[0]["files"])
         # pyrefly: ignore [unsupported-operation]
-        self.assertFileListsEqual(["a/d.txt"], sub2_data[0]["files"])
+        self.assertFileListsEqual(["d.txt"], sub2_data[0]["files"])
 
         # touch another file, make sure the updates come through again
-        self.touchRelative(a_dir, "f.dat")
+        self.touchRelative(root, "f.dat")
         ret = self.watchmanCommand(
             "flush-subscriptions",
             root,
@@ -603,9 +603,9 @@ class TestSubscribe(WatchmanTestCase.WatchmanTestCase):
             'for sub1, previous "clock" should be current "since"',
         )
         # pyrefly: ignore [unsupported-operation]
-        self.assertFileListsEqual(["a/f.dat"], sub1_data2[0]["files"])
+        self.assertFileListsEqual(["f.dat"], sub1_data2[0]["files"])
         # pyrefly: ignore [unsupported-operation]
-        self.assertFileListsEqual(["a/e.dat", "a/f.dat"], sub3_data2[0]["files"])
+        self.assertFileListsEqual(["e.dat", "f.dat"], sub3_data2[0]["files"])
 
         # now resume the subscriptions and make sure future updates (and only
         # future updates) come through
@@ -627,6 +627,33 @@ class TestSubscribe(WatchmanTestCase.WatchmanTestCase):
         # don't have a reference point
         self.assertFileListsEqual(["newfile.txt"], new_sub1["files"])
         self.assertFileListsEqual(["newfile.txt"], new_sub2["files"])
+
+        debug_ret = self.watchmanCommand(
+            "debug-set-subscriptions-paused", {"sub2": True, "sub3": True}
+        )
+        self.assertDictEqual(
+            {
+                "sub2": {"old": False, "new": True},
+                "sub3": {"old": False, "new": True},
+            },
+            debug_ret["paused"],
+        )
+        self.touchRelative(a_dir, "lemon.txt")
+        self.touchRelative(a_dir, "orange.dat")
+        ret = self.watchmanCommand(
+            "flush-subscriptions",
+            root,
+            {"sync_timeout": 1000, "subscriptions": ["sub2", "sub3"]},
+        )
+        self.assertCountEqual(["sub2", "sub3"], ret["synced"])
+        self.assertEqual([], ret["no_sync_needed"])
+        for name, path in [("sub2", "a/lemon.txt"), ("sub3", "a/orange.dat")]:
+            child_data = self.getSubscription(name, root)
+            assert isinstance(child_data, list)
+            self.assertEqual(1, len(child_data))
+            child_result = child_data[0]
+            assert isinstance(child_result, dict)
+            self.assertFileListsEqual([path], child_result["files"])
 
     def test_unsub_deadlock(self) -> None:
         """I saw a stack trace of a lock assertion that seemed to originate
