@@ -14,6 +14,10 @@ on:
         description: Run the unchanged native build and complete Mac suite
         type: boolean
         default: false
+      nice_startup_diagnostic:
+        description: Diagnose the exact foreground nice case with the pinned artifact
+        type: boolean
+        default: false
       glob_cli_repro:
         description: Run only the two source60f GlobCliJson artifact diagnostics
         type: boolean
@@ -220,7 +224,7 @@ jobs:
       run: gh cache list --repo ${{ github.repository }} --sort size_in_bytes --order desc --limit 30
 
   finalize-existing-artifact:
-    if: github.event_name == 'workflow_dispatch' && !inputs.glob_cli_repro && !inputs.full_suite
+    if: github.event_name == 'workflow_dispatch' && !inputs.glob_cli_repro && !inputs.full_suite && !inputs.nice_startup_diagnostic
     runs-on: macos-15
     timeout-minutes: 10
     steps:
@@ -273,7 +277,7 @@ jobs:
         path: _artifacts
 
   glob-cli-artifact-repro:
-    if: github.event_name == 'workflow_dispatch' && inputs.glob_cli_repro && !inputs.full_suite
+    if: github.event_name == 'workflow_dispatch' && inputs.glob_cli_repro && !inputs.full_suite && !inputs.nice_startup_diagnostic
     runs-on: macos-15
     timeout-minutes: 10
     env:
@@ -368,3 +372,22 @@ jobs:
         path: |
           negative.log
           candidate.log
+
+  nice-startup-diagnostic:
+    if: github.event_name == 'workflow_dispatch' && inputs.nice_startup_diagnostic && !inputs.full_suite
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+    - uses: actions/checkout@v6
+    - name: Download exact foreground diagnostic artifact
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: gh api repos/yasyf/watchman/actions/artifacts/13092856943/zip > "$RUNNER_TEMP/watchman-nice-diagnostic.zip"
+    - name: Diagnose original and explicit-positive foreground startup
+      run: python3 -I -B .github/scripts/watchman_nice_diagnostic.py "$RUNNER_TEMP/watchman-nice-diagnostic.zip" "$RUNNER_TEMP/watchman-nice-diagnostic"
+    - uses: actions/upload-artifact@v6
+      if: always()
+      with:
+        name: watchman-nice-startup-diagnostic
+        path: ${{ runner.temp }}/watchman-nice-diagnostic/diagnostic.json
+        if-no-files-found: error
