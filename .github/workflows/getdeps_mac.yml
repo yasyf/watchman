@@ -20,6 +20,7 @@ on:
         default: false
   push:
     branches:
+    - main
     - host-pressure/no-periodic-clock-20261026
     - host-pressure/cli-transport-contract-20261026
   pull_request:
@@ -186,8 +187,10 @@ jobs:
       run: sccache --show-stats
 
     - name: Copy artifacts
+      if: github.event_name != 'push' || github.ref != 'refs/heads/main'
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages fixup-dyn-deps --src-dir=. watchman _artifacts/mac --project-install-prefix watchman:/usr/local --final-install-prefix '@loader_path/..'
     - name: Finalize portable ad-hoc signatures
+      if: github.event_name != 'push' || github.ref != 'refs/heads/main'
       run: |
         for library in _artifacts/mac/lib/libglog.2.dylib _artifacts/mac/lib/libssl.1.1.dylib; do
           codesign -d --verbose=4 "$library" 2> "$RUNNER_TEMP/watchman-signature.txt"
@@ -202,11 +205,13 @@ jobs:
           codesign --verify --strict --verbose=2 "$image"
         done
     - uses: actions/upload-artifact@v6
+      if: github.event_name != 'push' || github.ref != 'refs/heads/main'
       with:
         name: watchman
         path: _artifacts
 
     - name: Test watchman
+      if: github.event_name != 'push' || github.ref != 'refs/heads/main'
       run: python3 build/fbcode_builder/getdeps.py --allow-system-packages test --num-jobs 2 --build-type RelWithDebInfo --src-dir=. watchman --project-install-prefix watchman:/usr/local
 
     - name: Show disk space at end
