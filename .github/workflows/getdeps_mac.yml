@@ -41,6 +41,7 @@ jobs:
       CC: /opt/homebrew/opt/llvm/bin/clang
       CXX: /opt/homebrew/opt/llvm/bin/clang++
       SCCACHE_GHA_ENABLED: "on"
+      RUSTC_WRAPPER: "sccache"
     steps:
 
     - name: Show runner info
